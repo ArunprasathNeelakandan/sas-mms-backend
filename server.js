@@ -6,6 +6,8 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+
+
 // Locations
 app.get('/api/locations', (req, res) => {
   const rows = db.prepare('SELECT id, name FROM locations ORDER BY id DESC').all();
