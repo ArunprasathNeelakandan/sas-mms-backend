@@ -1,6 +1,9 @@
-const Database = require('better-sqlite3');
+// const Database = require('better-sqlite3');
 const path = require('path');
-const db = new Database(path.resolve(__dirname, 'data.db'));
+// const db = new Database(path.resolve(__dirname, 'data.db'));
+
+const sqlite3 = require("sqlite3").verbose();
+const db = new sqlite3.Database("data.db");
 
 // Create tables if not exist
 db.exec(`
