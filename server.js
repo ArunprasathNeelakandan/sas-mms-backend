@@ -9,12 +9,19 @@ app.use(express.json());
 
 // PostgreSQL client
 const client = new Client({
-  user: "postgres",           // your current role
-  host: "localhost",
-  database: "inventorydb",    // the database you created
-  password: "18Ct2354@",  // the password you set during PostgreSQL install
+  user: "inventoryuser",           // your current role
+  host: "Gb7VPB7Nib2DwYOYU26GjISwFeDSGs3k",
+  database: "inventorydb_xwhg",    // the database you created
+  password: "Gb7VPB7Nib2DwYOYU26GjISwFeDSGs3k",  // the password you set during PostgreSQL install
   port: 5432
 });
+// const client = new Client({
+//   user: "postgres",           // your current role
+//   host: "localhost",
+//   database: "inventorydb",    // the database you created
+//   password: "18Ct2354@",  // the password you set during PostgreSQL install
+//   port: 5432
+// });
 
 
 async function initDb() {
