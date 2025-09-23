@@ -1,313 +1,245 @@
+// server.js
 const express = require('express');
-const db = require('./db');
+const { Client } = require('pg');
 const cors = require('cors');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-
-
-// Locations
-app.get('/api/locations', (req, res) => {
-  db.all('SELECT id, name FROM locations ORDER BY id DESC', (err, rows) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ error: "Database error" });
-    }
-    res.json(rows); // rows is an array
-  });
+// PostgreSQL client
+const client = new Client({
+  user: "postgres",           // your current role
+  host: "localhost",
+  database: "inventorydb",    // the database you created
+  password: "18Ct2354@",  // the password you set during PostgreSQL install
+  port: 5432
 });
 
-app.post('/api/locations', (req, res) => {
+
+async function initDb() {
+  try {
+    await client.connect();
+    console.log('✅ Connected to PostgreSQL');
+
+    // Create tables if not exist
+    const schema = `
+    CREATE TABLE IF NOT EXISTS locations (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE
+    );
+
+    CREATE TABLE IF NOT EXISTS materials (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      unit TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS location_materials (
+      id SERIAL PRIMARY KEY,
+      location_id INTEGER NOT NULL,
+      material_id INTEGER NOT NULL,
+      quantity INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(location_id, material_id),
+      FOREIGN KEY(location_id) REFERENCES locations(id),
+      FOREIGN KEY(material_id) REFERENCES materials(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS transactions (
+      id SERIAL PRIMARY KEY,
+      material_id INTEGER NOT NULL,
+      from_location_id INTEGER,
+      to_location_id INTEGER,
+      quantity INTEGER NOT NULL,
+      type TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(material_id) REFERENCES materials(id),
+      FOREIGN KEY(from_location_id) REFERENCES locations(id),
+      FOREIGN KEY(to_location_id) REFERENCES locations(id)
+    );
+    `;
+    await client.query(schema);
+    console.log('✅ Tables created (if not exist)');
+  } catch (err) {
+    console.error('❌ DB init error', err);
+  }
+}
+initDb();
+
+
+// -------------------- Locations --------------------
+app.get('/api/locations', async (req, res) => {
+  try {
+    const result = await client.query('SELECT id, name FROM locations ORDER BY id DESC');
+    res.json(result.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/locations', async (req, res) => {
   const { name } = req.body;
-
-  const sql = 'INSERT INTO locations(name) VALUES(?)';
-  db.run(sql, [name], function(err) {
-    if (err) {
-      console.error(err);
-      return res.status(400).json({ error: err.message });
-    }
-
-    // `this.lastID` gives the ID of the inserted row
-    res.json({ id: this.lastID, name });
-  });
+  try {
+    const result = await client.query(
+      'INSERT INTO locations(name) VALUES($1) RETURNING id',
+      [name]
+    );
+    res.json({ id: result.rows[0].id, name });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
 });
 
-// Materials
-app.get('/api/materials', (req, res) => {
-  const sql = 'SELECT id, name, unit FROM materials ORDER BY id DESC';
-  db.all(sql, (err, rows) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ error: 'Database error' });
-    }
-    res.json(rows); // rows is an array
-  });
+
+// -------------------- Materials --------------------
+app.get('/api/materials', async (req, res) => {
+  try {
+    const result = await client.query('SELECT id, name, unit FROM materials ORDER BY id DESC');
+    res.json(result.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-app.post('/api/materials', (req, res) => {
+app.post('/api/materials', async (req, res) => {
   const { name, unit } = req.body;
-
-  const sql = 'INSERT INTO materials(name, unit) VALUES(?, ?)';
-  db.run(sql, [name, unit || ''], function(err) {
-    if (err) {
-      console.error(err);
-      return res.status(400).json({ error: err.message });
-    }
-
-    // `this.lastID` gives the ID of the inserted row
-    res.json({ id: this.lastID, name, unit });
-  });
+  try {
+    const result = await client.query(
+      'INSERT INTO materials(name, unit) VALUES($1,$2) RETURNING id',
+      [name, unit || '']
+    );
+    res.json({ id: result.rows[0].id, name, unit });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
 });
 
-// Add inventory (increase quantity at location) - also logs transaction
 
-app.post('/api/inventory/add', (req, res) => {
+// -------------------- Inventory Add --------------------
+app.post('/api/inventory/add', async (req, res) => {
   const { location_id, material_id, quantity } = req.body;
-
   if (!location_id || !material_id || !Number.isInteger(quantity) || quantity <= 0) {
     return res.status(400).json({ error: 'location_id, material_id and positive integer quantity required' });
   }
 
-  // Begin transaction
-  db.serialize(() => {
-    db.run("BEGIN TRANSACTION");
+  try {
+    await client.query('BEGIN');
 
-    // Step 1: Insert or update quantity in location_materials
-    db.get(
-      `SELECT quantity FROM location_materials WHERE location_id = ? AND material_id = ?`,
-      [location_id, material_id],
-      (err, row) => {
-        if (err) {
-          console.error(err);
-          db.run("ROLLBACK");
-          return res.status(500).json({ error: err.message });
-        }
+    await client.query(`
+      INSERT INTO location_materials(location_id, material_id, quantity)
+      VALUES($1,$2,$3)
+      ON CONFLICT(location_id, material_id) 
+      DO UPDATE SET quantity = location_materials.quantity + EXCLUDED.quantity
+    `, [location_id, material_id, quantity]);
 
-        if (row) {
-          // Row exists → update quantity
-          db.run(
-            `UPDATE location_materials SET quantity = quantity + ? WHERE location_id = ? AND material_id = ?`,
-            [quantity, location_id, material_id],
-            (err) => {
-              if (err) {
-                console.error(err);
-                db.run("ROLLBACK");
-                return res.status(500).json({ error: err.message });
-              }
-              insertTransaction();
-            }
-          );
-        } else {
-          // Row does not exist → insert new
-          db.run(
-            `INSERT INTO location_materials(location_id, material_id, quantity) VALUES (?, ?, ?)`,
-            [location_id, material_id, quantity],
-            (err) => {
-              if (err) {
-                console.error(err);
-                db.run("ROLLBACK");
-                return res.status(500).json({ error: err.message });
-              }
-              insertTransaction();
-            }
-          );
-        }
-      }
-    );
+    await client.query(`
+      INSERT INTO transactions(material_id, from_location_id, to_location_id, quantity, type)
+      VALUES($1,$2,$3,$4,$5)
+    `, [material_id, null, location_id, quantity, 'add']);
 
-    // Step 2: Insert into transactions table
-    function insertTransaction() {
-      db.run(
-        `INSERT INTO transactions(material_id, from_location_id, to_location_id, quantity, type) VALUES (?, ?, ?, ?, ?)`,
-        [material_id, null, location_id, quantity, 'add'],
-        (err) => {
-          if (err) {
-            console.error(err);
-            db.run("ROLLBACK");
-            return res.status(500).json({ error: err.message });
-          }
-          db.run("COMMIT", (err) => {
-            if (err) {
-              console.error(err);
-              return res.status(500).json({ error: err.message });
-            }
-            res.json({ ok: true });
-          });
-        }
-      );
-    }
-  });
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// Transfer between locations
-app.post('/api/inventory/transfer', (req, res) => {
-  const { from_location_id, to_location_id, material_id, quantity } = req.body;
 
-  if (
-    !from_location_id ||
-    !to_location_id ||
-    !material_id ||
-    !Number.isInteger(quantity) ||
-    quantity <= 0
-  ) {
+// -------------------- Inventory Transfer --------------------
+app.post('/api/inventory/transfer', async (req, res) => {
+  const { from_location_id, to_location_id, material_id, quantity } = req.body;
+  if (!from_location_id || !to_location_id || !material_id || !Number.isInteger(quantity) || quantity <= 0) {
     return res.status(400).json({ error: 'from_location_id, to_location_id, material_id and positive integer quantity required' });
   }
 
-  db.serialize(() => {
-    db.run("BEGIN TRANSACTION");
+  try {
+    await client.query('BEGIN');
 
-    // Step 1: Check quantity at source
-    db.get(
-      'SELECT id, quantity FROM location_materials WHERE location_id=? AND material_id=?',
-      [from_location_id, material_id],
-      (err, fromRow) => {
-        if (err) {
-          console.error(err);
-          db.run("ROLLBACK");
-          return res.status(500).json({ error: err.message });
-        }
-
-        if (!fromRow || fromRow.quantity < quantity) {
-          db.run("ROLLBACK");
-          return res.status(400).json({ error: 'insufficient quantity at source location' });
-        }
-
-        // Step 2: Deduct quantity from source
-        db.run(
-          'UPDATE location_materials SET quantity = quantity - ? WHERE id = ?',
-          [quantity, fromRow.id],
-          (err) => {
-            if (err) {
-              console.error(err);
-              db.run("ROLLBACK");
-              return res.status(500).json({ error: err.message });
-            }
-
-            // Step 3: Add quantity to destination (insert or update)
-            db.get(
-              'SELECT id, quantity FROM location_materials WHERE location_id=? AND material_id=?',
-              [to_location_id, material_id],
-              (err, toRow) => {
-                if (err) {
-                  console.error(err);
-                  db.run("ROLLBACK");
-                  return res.status(500).json({ error: err.message });
-                }
-
-                if (toRow) {
-                  // Exists → update
-                  db.run(
-                    'UPDATE location_materials SET quantity = quantity + ? WHERE id = ?',
-                    [quantity, toRow.id],
-                    insertTransaction
-                  );
-                } else {
-                  // Does not exist → insert
-                  db.run(
-                    'INSERT INTO location_materials(location_id, material_id, quantity) VALUES(?, ?, ?)',
-                    [to_location_id, material_id, quantity],
-                    insertTransaction
-                  );
-                }
-
-                // Step 4: Insert transaction record
-                function insertTransaction(err) {
-                  if (err) {
-                    console.error(err);
-                    db.run("ROLLBACK");
-                    return res.status(500).json({ error: err.message });
-                  }
-
-                  db.run(
-                    'INSERT INTO transactions(material_id, from_location_id, to_location_id, quantity, type) VALUES(?,?,?,?,?)',
-                    [material_id, from_location_id, to_location_id, quantity, 'transfer'],
-                    (err) => {
-                      if (err) {
-                        console.error(err);
-                        db.run("ROLLBACK");
-                        return res.status(500).json({ error: err.message });
-                      }
-
-                      db.run("COMMIT", (err) => {
-                        if (err) {
-                          console.error(err);
-                          return res.status(500).json({ error: err.message });
-                        }
-                        res.json({ ok: true });
-                      });
-                    }
-                  );
-                }
-              }
-            );
-          }
-        );
-      }
+    const fromRowResult = await client.query(
+      'SELECT id, quantity FROM location_materials WHERE location_id=$1 AND material_id=$2',
+      [from_location_id, material_id]
     );
-  });
-});
-
-
-app.get('/api/inventory/all', (req, res) => {
-  const sql = `
-    SELECT *
-    FROM location_materials lm
-    JOIN materials m ON m.id = lm.material_id
-  `;
-
-  db.all(sql, (err, rows) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ error: 'Database error' });
+    const fromRow = fromRowResult.rows[0];
+    if (!fromRow || fromRow.quantity < quantity) {
+      throw new Error('insufficient quantity at source location');
     }
 
-    res.json(rows); // rows is always an array
-  });
+    await client.query(
+      'UPDATE location_materials SET quantity = quantity - $1 WHERE id = $2',
+      [quantity, fromRow.id]
+    );
+
+    await client.query(`
+      INSERT INTO location_materials(location_id, material_id, quantity)
+      VALUES($1,$2,$3)
+      ON CONFLICT(location_id, material_id)
+      DO UPDATE SET quantity = location_materials.quantity + EXCLUDED.quantity
+    `, [to_location_id, material_id, quantity]);
+
+    await client.query(`
+      INSERT INTO transactions(material_id, from_location_id, to_location_id, quantity, type)
+      VALUES($1,$2,$3,$4,$5)
+    `, [material_id, from_location_id, to_location_id, quantity, 'transfer']);
+
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    res.status(400).json({ error: e.message });
+  }
 });
 
-// Get inventory for a location
-app.get('/api/inventory/:location_id', (req, res) => {
+
+// -------------------- Inventory Queries --------------------
+app.get('/api/inventory/all', async (req, res) => {
+  try {
+    const result = await client.query(`
+      SELECT *
+      FROM location_materials lm
+      JOIN materials m ON m.id = lm.material_id
+    `);
+    res.json(result.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/inventory/:location_id', async (req, res) => {
   const location_id = Number(req.params.location_id);
-
-  const sql = `
-    SELECT lm.material_id, m.name as material_name, lm.quantity, m.unit
-    FROM location_materials lm
-    JOIN materials m ON m.id = lm.material_id
-    WHERE lm.location_id = ?
-  `;
-
-  db.all(sql, [location_id], (err, rows) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ error: 'Database error' });
-    }
-
-    res.json(rows); // rows is an array
-  });
-});
-// Transactions list
-app.get('/api/transactions', (req, res) => {
-  const sql = `
-    SELECT t.id, t.material_id, m.name as material_name, t.from_location_id, lf.name as from_location,
-           t.to_location_id, lt.name as to_location, t.quantity, t.type, t.created_at
-    FROM transactions t
-    LEFT JOIN materials m ON m.id = t.material_id
-    LEFT JOIN locations lf ON lf.id = t.from_location_id
-    LEFT JOIN locations lt ON lt.id = t.to_location_id
-    ORDER BY t.id DESC
-  `;
-
-  db.all(sql, (err, rows) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ error: 'Database error' });
-    }
-
-    res.json(rows); // rows is always an array
-  });
+  try {
+    const result = await client.query(`
+      SELECT lm.material_id, m.name as material_name, lm.quantity, m.unit
+      FROM location_materials lm
+      JOIN materials m ON m.id = lm.material_id
+      WHERE lm.location_id = $1
+    `, [location_id]);
+    res.json(result.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
+
+// -------------------- Transactions --------------------
+app.get('/api/transactions', async (req, res) => {
+  try {
+    const result = await client.query(`
+      SELECT t.id, t.material_id, m.name as material_name, t.from_location_id, lf.name as from_location,
+             t.to_location_id, lt.name as to_location, t.quantity, t.type, t.created_at
+      FROM transactions t
+      LEFT JOIN materials m ON m.id = t.material_id
+      LEFT JOIN locations lf ON lf.id = t.from_location_id
+      LEFT JOIN locations lt ON lt.id = t.to_location_id
+      ORDER BY t.id DESC
+    `);
+    res.json(result.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+// -------------------- Start Server --------------------
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log('Server listening on', PORT));
