@@ -10,7 +10,7 @@ app.use(express.json());
 // PostgreSQL client
 const client = new Client({
   user: "inventoryuser",           // your current role
-  host: "Gb7VPB7Nib2DwYOYU26GjISwFeDSGs3k",
+  host: "dpg-cgh4jshv3hkbpgb4uo2g-a.render.com",
   database: "inventorydb_xwhg",    // the database you created
   password: "Gb7VPB7Nib2DwYOYU26GjISwFeDSGs3k",  // the password you set during PostgreSQL install
   port: 5432
